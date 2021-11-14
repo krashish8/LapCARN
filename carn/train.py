@@ -41,7 +41,7 @@ def parse_args():
 
 def main(cfg):
     # dynamic import using --model argument
-    net = importlib.import_module("model.{}".format(cfg.model)).Net
+    net = importlib.import_module("model.{}".format(cfg.model)).LapCARN
     print(json.dumps(vars(cfg), indent=4, sort_keys=True))
     
     solver = Solver(net, cfg)

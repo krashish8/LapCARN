@@ -3,18 +3,19 @@ import random
 import numpy as np
 import scipy.misc as misc
 import skimage.measure as measure
-from tensorboardX import SummaryWriter
+import skimage.metrics as metrics
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from dataset import TrainDataset, TestDataset
+from torch.autograd import Variable
 
 class Solver():
     def __init__(self, model, cfg):
+        print(torch.cuda.is_available())
         if cfg.scale > 0:
-            self.refiner = model(scale=cfg.scale, 
-                                 group=cfg.group)
+            self.refiner = model()
         else:
             self.refiner = model(multi_scale=True, 
                                  group=cfg.group)
@@ -44,9 +45,11 @@ class Solver():
         self.loss_fn = self.loss_fn
 
         self.cfg = cfg
-        self.step = 0
+        self.step = 19499
         
-        self.writer = SummaryWriter(log_dir=os.path.join("runs", cfg.ckpt_name))
+        weights_file = '/scratch/ssrivastava.cse18.iitbhu/CARN/checkpoint/lapcarn/lapcarn_19499.pth'
+        self.refiner.load_state_dict(torch.load(weights_file))
+        
         if cfg.verbose:
             num_params = 0
             for param in self.refiner.parameters():
@@ -65,24 +68,26 @@ class Solver():
             for inputs in self.train_loader:
                 self.refiner.train()
 
-                if cfg.scale > 0:
-                    scale = cfg.scale
-                    hr, lr = inputs[-1][0], inputs[-1][1]
-                else:
-                    # only use one of multi-scale data
-                    # i know this is stupid but just temporary
-                    scale = random.randint(2, 4)
-                    hr, lr = inputs[scale-2][0], inputs[scale-2][1]
-                
-                hr = hr.to(self.device)
+                scale = cfg.scale
+                hr_8x, hr_4x, hr_2x, lr = Variable(inputs[0], requires_grad=False), Variable(inputs[1], requires_grad=False), Variable(inputs[2], requires_grad=False), Variable(inputs[3])
+                hr_8x = hr_8x.to(self.device)
+                hr_4x = hr_4x.to(self.device)
+                hr_2x = hr_2x.to(self.device)
                 lr = lr.to(self.device)
                 
-                sr = refiner(lr, scale)
-                loss = self.loss_fn(sr, hr)
+                sr = refiner(lr)
+                sr_2x = sr[0]
+                sr_4x = sr[1]
+                sr_8x = sr[2]
+                loss_2x = self.loss_fn(sr_2x, hr_2x)
+                loss_4x = self.loss_fn(sr_4x, hr_4x)
+                loss_8x = self.loss_fn(sr_8x, hr_8x)
                 
                 self.optim.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm(self.refiner.parameters(), cfg.clip)
+                loss_2x.backward(retain_graph=True)
+                loss_4x.backward(retain_graph=True)
+                loss_8x.backward()
+                torch.nn.utils.clip_grad_norm_(self.refiner.parameters(), cfg.clip)
                 self.optim.step()
 
                 learning_rate = self.decay_learning_rate()
@@ -90,36 +95,51 @@ class Solver():
                     param_group["lr"] = learning_rate
                 
                 self.step += 1
+                print("[" + str(self.step) + "]", loss_2x.data.item(), loss_4x.data.item(), loss_8x.data.item(), loss_2x.data.item()+loss_4x.data.item()+loss_8x.data.item())
                 if cfg.verbose and self.step % cfg.print_interval == 0:
-                    if cfg.scale > 0:
-                        psnr = self.evaluate("dataset/Urban100", scale=cfg.scale, num_step=self.step)
-                        self.writer.add_scalar("Urban100", psnr, self.step)
-                    else:    
-                        psnr = [self.evaluate("dataset/Urban100", scale=i, num_step=self.step) for i in range(2, 5)]
-                        self.writer.add_scalar("Urban100_2x", psnr[0], self.step)
-                        self.writer.add_scalar("Urban100_3x", psnr[1], self.step)
-                        self.writer.add_scalar("Urban100_4x", psnr[2], self.step)
+                    psnr_2, psnr_4, psnr_8 = self.evaluate("dataset/Urban100", num_step=self.step)
+                    print("[" + str(self.step) + "] PSNR", psnr_2, psnr_4, psnr_8)
                             
                     self.save(cfg.ckpt_dir, cfg.ckpt_name)
 
             if self.step > cfg.max_steps: break
 
-    def evaluate(self, test_data_dir, scale=2, num_step=0):
+    def evaluate(self, test_data_dir, num_step=0):
         cfg = self.cfg
-        mean_psnr = 0
+        mean_psnr_2 = 0
+        mean_psnr_4 = 0
+        mean_psnr_8 = 0
         self.refiner.eval()
         
-        test_data   = TestDataset(test_data_dir, scale=scale)
+        test_data   = TestDataset(test_data_dir)
         test_loader = DataLoader(test_data,
                                  batch_size=1,
                                  num_workers=1,
                                  shuffle=False)
-
         for step, inputs in enumerate(test_loader):
-            hr = inputs[0].squeeze(0)
-            lr = inputs[1].squeeze(0)
-            name = inputs[2][0]
+            lr = inputs[0].squeeze(0)
+            hr_2x = inputs[1].squeeze(0)
+            hr_4x = inputs[2].squeeze(0)
+            hr_8x = inputs[3].squeeze(0)
+            
 
+            sr_2x, sr_4x, sr_8x = self.refiner(lr.unsqueeze(0).to(self.device))
+            sr_2x = sr_2x.data.squeeze(0)
+            sr_4x = sr_4x.data.squeeze(0)
+            sr_8x = sr_8x.data.squeeze(0)
+            
+            hr_2x = hr_2x.cpu().mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
+            sr_2x = sr_2x.cpu().mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
+            hr_4x = hr_4x.cpu().mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
+            sr_4x = sr_4x.cpu().mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
+            hr_8x = hr_8x.cpu().mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
+            sr_8x = sr_8x.cpu().mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
+            
+            mean_psnr_2 += psnr(hr_2x, sr_2x) / len(test_data)
+            mean_psnr_4 += psnr(hr_4x, sr_4x) / len(test_data)
+            mean_psnr_8 += psnr(hr_8x, sr_8x) / len(test_data)
+
+            '''
             h, w = lr.size()[1:]
             h_half, w_half = int(h/2), int(w/2)
             h_chop, w_chop = h_half + cfg.shave, w_half + cfg.shave
@@ -133,7 +153,7 @@ class Solver():
             lr_patch = lr_patch.to(self.device)
             
             # run refine process in here!
-            sr = self.refiner(lr_patch, scale).data
+            sr = self.refiner(lr_patch).data
             
             h, h_half, h_chop = h*scale, h_half*scale, h_chop*scale
             w, w_half, w_chop = w*scale, w_half*scale, w_chop*scale
@@ -149,6 +169,7 @@ class Solver():
             hr = hr.cpu().mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
             sr = sr.cpu().mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
             
+            
             # evaluate PSNR
             # this evaluation is different to MATLAB version
             # we evaluate PSNR in RGB channel not Y in YCbCR  
@@ -156,8 +177,9 @@ class Solver():
             im1 = hr[bnd:-bnd, bnd:-bnd]
             im2 = sr[bnd:-bnd, bnd:-bnd]
             mean_psnr += psnr(im1, im2) / len(test_data)
+            '''
 
-        return mean_psnr
+        return mean_psnr_2, mean_psnr_4, mean_psnr_8
 
     def load(self, path):
         self.refiner.load_state_dict(torch.load(path))
@@ -186,5 +208,5 @@ def psnr(im1, im2):
         
     im1 = im2double(im1)
     im2 = im2double(im2)
-    psnr = measure.compare_psnr(im1, im2, data_range=1)
+    psnr = metrics.peak_signal_noise_ratio(im1, im2, data_range=1)
     return psnr

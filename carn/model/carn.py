@@ -34,12 +34,10 @@ class Block(nn.Module):
         
 
 class Net(nn.Module):
-    def __init__(self, **kwargs):
+    def __init__(self):
         super(Net, self).__init__()
-        
-        scale = kwargs.get("scale")
-        multi_scale = kwargs.get("multi_scale")
-        group = kwargs.get("group", 1)
+
+        group = 1
 
         self.sub_mean = ops.MeanShift((0.4488, 0.4371, 0.4040), sub=True)
         self.add_mean = ops.MeanShift((0.4488, 0.4371, 0.4040), sub=False)
@@ -53,14 +51,12 @@ class Net(nn.Module):
         self.c2 = ops.BasicBlock(64*3, 64, 1, 1, 0)
         self.c3 = ops.BasicBlock(64*4, 64, 1, 1, 0)
         
-        self.upsample = ops.UpsampleBlock(64, scale=scale, 
-                                          multi_scale=multi_scale,
-                                          group=group)
+        self.upsample = ops.UpsampleBlock(64, group=group)
         self.exit = nn.Conv2d(64, 3, 3, 1, 1)
                 
-    def forward(self, x, scale):
-        x = self.sub_mean(x)
-        x = self.entry(x)
+    def forward(self, x):
+        # x = self.sub_mean(x)
+        # x = self.entry(x)
         c0 = o0 = x
 
         b1 = self.b1(o0)
@@ -75,9 +71,10 @@ class Net(nn.Module):
         c3 = torch.cat([c2, b3], dim=1)
         o3 = self.c3(c3)
 
-        out = self.upsample(o3, scale=scale)
 
-        out = self.exit(out)
-        out = self.add_mean(out)
+        out = self.upsample(o3, scale=2)
+
+        # out = self.exit(out)
+        # out = self.add_mean(out)
 
         return out
