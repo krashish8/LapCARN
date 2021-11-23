@@ -7,7 +7,7 @@
 
 ### Testing
 
-We provide the models in `checkpoint` directory. For testing, run the [eval.py](./eval.py) file and adjust accordingly.
+We provide the models in `checkpoint` directory. For testing, run the [eval.ipynb](./eval.ipynb) file using Jupyter Notebook and adjust accordingly.
 
 ### Training
 
